@@ -1,596 +1,126 @@
+// ================================
+// BACKEND (Node.js + Express)
+// Datei: server.js
+// ================================
+
+const express = require("express");
+const http = require("http");
+const { Server } = require("socket.io");
+const bcrypt = require("bcrypt");
+const sqlite3 = require("sqlite3").verbose();
+
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server);
+
+app.use(express.json());
+app.use(express.static("public"));
+
+// Datenbank
+const db = new sqlite3.Database("users.db");
+
+db.run(`CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT UNIQUE,
+  password TEXT
+)`);
+
+// Registrierung
+app.post("/register", async (req, res) => {
+  const { username, password } = req.body;
+  const hash = await bcrypt.hash(password, 10);
+
+  db.run("INSERT INTO users(username, password) VALUES(?,?)", [username, hash], err => {
+    if (err) return res.status(400).send("User existiert bereits");
+    res.send("Registriert");
+  });
+});
+
+// Login
+app.post("/login", (req, res) => {
+  const { username, password } = req.body;
+
+  db.get("SELECT * FROM users WHERE username=?", [username], async (err, user) => {
+    if (!user) return res.status(401).send("Falsche Daten");
+    const ok = await bcrypt.compare(password, user.password);
+    if (!ok) return res.status(401).send("Falsche Daten");
+    res.send("OK");
+  });
+});
+
+// Voice-Signaling
+io.on("connection", socket => {
+  socket.on("join", room => {
+    socket.join(room);
+    socket.to(room).emit("user-joined", socket.id);
+  });
+
+  socket.on("signal", data => {
+    socket.to(data.room).emit("signal", data);
+  });
+});
+
+server.listen(3000, () => console.log("Server läuft auf Port 3000"));
+
+
+// ================================
+// FRONTEND
+// Ordner: public/
+// Dateien: index.html, script.js
+// ================================
+
+/* index.html
 <!DOCTYPE html>
 <html lang="de">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FUNKNET RP • Notruf-Funk</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.6.0/css/all.min.css">
-    <style>
-        @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
-        
-        body {
-            font-family: 'Press Start 2P', system-ui;
-        }
-        
-        .scanline {
-            position: relative;
-        }
-        .scanline::after {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: linear-gradient(to bottom, transparent 50%, rgba(0, 255, 0, 0.03) 50%);
-            background-size: 100% 4px;
-            pointer-events: none;
-            animation: scan 4s linear infinite;
-        }
-        
-        @keyframes scan {
-            0% { background-position: 0 0; }
-            100% { background-position: 0 200px; }
-        }
-        
-        .radio-log {
-            font-family: monospace;
-            text-shadow: 0 0 8px #00ff00;
-        }
-        
-        .ptt-active {
-            animation: ptt-pulse 1.5s infinite;
-        }
-        
-        @keyframes ptt-pulse {
-            0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
-            70% { box-shadow: 0 0 0 30px rgba(239, 68, 68, 0); }
-        }
-    </style>
+  <meta charset="UTF-8">
+  <title>Funk System</title>
 </head>
-<body class="bg-zinc-950 text-lime-400 overflow-hidden">
-    <!-- LOGIN / REGISTER -->
-    <div id="auth-screen" class="min-h-screen flex items-center justify-center bg-[radial-gradient(at_center,#111_0%,#000_70%)]">
-        <div class="w-full max-w-md p-8 border-4 border-lime-400 bg-black shadow-2xl scanline">
-            <div class="text-center mb-8">
-                <div class="inline-flex items-center gap-3 text-4xl mb-2">
-                    <span class="text-red-500">📡</span>
-                    <span class="text-white tracking-widest">FUNKNET</span>
-                    <span class="text-red-500">RP</span>
-                </div>
-                <p class="text-xs text-lime-300">NOTRUF • FEUERWEHR • POLIZEI • RETTUNG • DACE</p>
-            </div>
-            
-            <!-- LOGIN -->
-            <div id="login-form">
-                <h2 class="text-xl mb-6 text-center text-white">ANMELDEN</h2>
-                <input id="login-username" type="text" placeholder="BENUTZERNAME" 
-                       class="w-full bg-zinc-900 border-2 border-lime-400 text-white p-4 mb-4 focus:outline-none focus:border-red-500 text-center">
-                <input id="login-password" type="password" placeholder="PASSWORT" 
-                       class="w-full bg-zinc-900 border-2 border-lime-400 text-white p-4 mb-6 focus:outline-none focus:border-red-500 text-center">
-                <button onclick="login()" 
-                        class="w-full bg-red-600 hover:bg-red-700 py-4 text-white font-bold tracking-widest border-4 border-red-400 hover:border-red-300">
-                    LOGIN
-                </button>
-                <p onclick="showRegister()" class="text-center text-lime-300 text-xs mt-6 cursor-pointer hover:text-white">
-                    Noch kein Account? → REGISTRIEREN
-                </p>
-            </div>
-            
-            <!-- REGISTER -->
-            <div id="register-form" class="hidden">
-                <h2 class="text-xl mb-6 text-center text-white">REGISTRIEREN</h2>
-                <input id="reg-username" type="text" placeholder="BENUTZERNAME" 
-                       class="w-full bg-zinc-900 border-2 border-lime-400 text-white p-4 mb-4 focus:outline-none focus:border-red-500 text-center">
-                <input id="reg-password" type="password" placeholder="PASSWORT" 
-                       class="w-full bg-zinc-900 border-2 border-lime-400 text-white p-4 mb-4 focus:outline-none focus:border-red-500 text-center">
-                <input id="reg-password2" type="password" placeholder="PASSWORT WIEDERHOLEN" 
-                       class="w-full bg-zinc-900 border-2 border-lime-400 text-white p-4 mb-6 focus:outline-none focus:border-red-500 text-center">
-                <button onclick="register()" 
-                        class="w-full bg-lime-600 hover:bg-lime-700 py-4 text-black font-bold tracking-widest border-4 border-lime-400">
-                    ACCOUNT ERSTELLEN
-                </button>
-                <p onclick="showLogin()" class="text-center text-lime-300 text-xs mt-6 cursor-pointer hover:text-white">
-                    ← ZURÜCK ZUM LOGIN
-                </p>
-            </div>
-        </div>
-    </div>
+<body>
+  <h2>Funk wählen</h2>
+  <select id="funk">
+    <option>Feuerwehr</option>
+    <option>Krankenhaus</option>
+    <option>Polizei</option>
+    <option>Rettungsdienst</option>
+    <option>DACE</option>
+  </select>
+  <p>Push-To-Talk: Taste V gedrückt halten</p>
 
-    <!-- MAIN APP -->
-    <div id="app-screen" class="hidden h-screen flex flex-col">
-        <!-- HEADER -->
-        <header class="bg-black border-b-4 border-red-600 px-6 py-3 flex items-center justify-between">
-            <div class="flex items-center gap-4">
-                <span class="text-3xl">📡</span>
-                <div>
-                    <span class="text-2xl text-white tracking-widest">FUNKNET RP</span>
-                    <div class="text-[10px] text-red-500 -mt-1">v1.337 • LIVE</div>
-                </div>
-            </div>
-            
-            <div class="flex items-center gap-6">
-                <div id="current-user" class="text-right">
-                    <div class="text-lime-300 text-sm">EINGELOGGT ALS</div>
-                    <div id="username-display" class="text-white font-bold"></div>
-                </div>
-                <button onclick="logout()" 
-                        class="px-6 py-2 bg-zinc-900 hover:bg-red-900 border-2 border-red-600 text-red-400 hover:text-white text-sm">
-                    AUSLOGGEN
-                </button>
-            </div>
-        </header>
-
-        <div class="flex flex-1 overflow-hidden">
-            <!-- CHANNELS SIDEBAR -->
-            <div class="w-72 bg-zinc-900 border-r-4 border-red-600 p-4 flex flex-col">
-                <div class="text-red-500 text-xs mb-4 tracking-widest flex items-center gap-2">
-                    <i class="fas fa-broadcast-tower"></i>
-                    VERFÜGBARE FUNKS
-                </div>
-                
-                <div id="channels-list" class="flex-1 space-y-2 overflow-y-auto"></div>
-                
-                <div class="mt-auto pt-6 border-t border-zinc-700 text-[10px] text-center text-zinc-500">
-                    TAB = PUSH TO TALK<br>
-                    Nur im aktiven Funk
-                </div>
-            </div>
-
-            <!-- MAIN CONTENT -->
-            <div class="flex-1 flex flex-col">
-                <!-- CHANNEL HEADER -->
-                <div id="channel-header" class="h-16 bg-black border-b-4 border-lime-400 flex items-center px-8 text-white">
-                    <div id="channel-icon" class="text-4xl mr-6"></div>
-                    <div>
-                        <div id="channel-name" class="text-2xl font-bold"></div>
-                        <div id="channel-status" class="text-xs text-lime-300">VERBUNDEN • 24.7 MHz</div>
-                    </div>
-                    
-                    <div class="ml-auto flex items-center gap-8 text-xs">
-                        <div onclick="leaveChannel()" 
-                             class="cursor-pointer hover:text-red-400 flex items-center gap-2">
-                            <i class="fas fa-times"></i>
-                            FUNK VERLASSEN
-                        </div>
-                    </div>
-                </div>
-
-                <!-- TRANSMISSION LOG -->
-                <div id="transmission-log" 
-                     class="radio-log flex-1 p-6 overflow-y-auto bg-zinc-950 space-y-6 text-sm leading-relaxed">
-                    <!-- JS injected -->
-                </div>
-
-                <!-- PTT AREA -->
-                <div class="h-32 bg-black border-t-8 border-red-600 flex items-center justify-center relative">
-                    <div id="ptt-instruction" 
-                         class="text-center text-red-400 text-xl tracking-widest">
-                        HALTE <span class="font-mono bg-zinc-900 px-4 py-1 border border-red-500">TAB</span><br>
-                        <span class="text-xs text-zinc-500 mt-2 block">UM ZU SPRECHEN</span>
-                    </div>
-                    
-                    <!-- ACTIVE PTT -->
-                    <div id="ptt-active" class="hidden absolute inset-0 flex items-center justify-center bg-red-600/10 ptt-active">
-                        <div class="text-center">
-                            <div class="text-6xl mb-4 animate-pulse">🎤</div>
-                            <div class="text-3xl font-bold text-red-500 tracking-widest">ÜBERTRAGUNG AKTIV</div>
-                            <div class="text-xs text-red-300 mt-2">SPRICH JETZT IN DEIN MIKROFON</div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- ONLINE USERS -->
-            <div class="w-80 bg-zinc-900 border-l-4 border-red-600 p-4 flex flex-col">
-                <div class="text-red-500 text-xs mb-4 tracking-widest flex items-center gap-2">
-                    <i class="fas fa-users"></i>
-                    ONLINE IM FUNK
-                </div>
-                <div id="online-list" class="flex-1 space-y-3 overflow-y-auto text-sm"></div>
-                
-                <div class="mt-8 text-[10px] text-zinc-500 border-t border-zinc-700 pt-4">
-                    Dein Mikrofon wird nur bei TAB gedrückt aktiviert.<br>
-                    Browser muss Mikrofon-Zugriff erlauben.
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <script>
-        // Tailwind script
-        tailwind.config = {
-            content: [],
-            theme: {
-                extend: {}
-            }
-        }
-
-        // Data
-        let allUsers = [
-            { username: "Feuer01", password: "feuer123" },
-            { username: "Polizei42", password: "polizei" },
-            { username: "RD-Heli", password: "rettung" }
-        ];
-        
-        let currentUser = null;
-        let currentChannelKey = null;
-        
-        let channelsData = {
-            feuerwehr: {
-                name: "FEUERWEHR",
-                icon: "🚒",
-                color: "orange",
-                log: [],
-                online: ["FW-Zentrale", "LZ-01", "DLK-23", "Einsatzleiter-3"],
-                messages: [
-                    "Brand unter Kontrolle!",
-                    "Brauchen Verstärkung, 3. Stock!",
-                    "Atemluft nur noch 40%",
-                    "Person gerettet, abtransportiert",
-                    "Wasserwerfer in Position"
-                ]
-            },
-            krankenhaus: {
-                name: "KRANKENHAUS",
-                icon: "🏥",
-                color: "blue",
-                log: [],
-                online: ["Notaufnahme", "Dr.Müller", "OP-Team-2", "Intensiv-Station"],
-                messages: [
-                    "Patient stabil, Blutdruck 120/80",
-                    "Code Red - sofort OP!",
-                    "Ankunft RTW in 90 Sekunden",
-                    "Blutkonserven bereitgestellt"
-                ]
-            },
-            polizei: {
-                name: "POLIZEI",
-                icon: "🚔",
-                color: "green",
-                log: [],
-                online: ["Leitstelle", "Streife-42", "EK-Alpha", "Verkehr-7"],
-                messages: [
-                    "Verdächtiger gesichtet, Richtung Nord",
-                    "Verfolgung läuft - Tempo 180!",
-                    "Festnahme erfolgt",
-                    "Straßensperre errichtet"
-                ]
-            },
-            rettungsdienst: {
-                name: "RETTUNGSDIENST",
-                icon: "🚑",
-                color: "red",
-                log: [],
-                online: ["RTW-01", "NEF-05", "Leitstelle-RD", "Notarzt-3"],
-                messages: [
-                    "Patient intubiert, auf dem Weg",
-                    "Vitalwerte kritisch",
-                    "Unfallstelle gesichert",
-                    "Zweiter RTW angefordert"
-                ]
-            },
-            dace: {
-                name: "DACE",
-                icon: "🛡️",
-                color: "purple",
-                log: [],
-                online: ["DACE-Leitung", "Field-Agent-07", "Support-Team", "Extraction-Unit"],
-                messages: [
-                    "Mission läuft nach Plan",
-                    "Ziel erfasst",
-                    "Extraktion in 3 Minuten",
-                    "Alle Einheiten - All Clear"
-                ]
-            }
-        };
-
-        // Speech
-        let recognition = null;
-        let isPTTPressed = false;
-        let fakeTalkInterval = null;
-
-        function initSpeechRecognition() {
-            if ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window) {
-                const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-                recognition = new SpeechRecognition();
-                recognition.lang = 'de-DE';
-                recognition.interimResults = false;
-                recognition.continuous = false;
-
-                recognition.onresult = function(event) {
-                    const transcript = event.results[0][0].transcript.trim();
-                    if (transcript.length > 2 && currentChannelKey) {
-                        addToLog(currentUser.username, transcript);
-                    }
-                };
-
-                recognition.onerror = function() {
-                    stopPTTVisual();
-                };
-
-                recognition.onend = function() {
-                    stopPTTVisual();
-                };
-            }
-        }
-
-        function startPTTVisual() {
-            document.getElementById('ptt-instruction').classList.add('hidden');
-            document.getElementById('ptt-active').classList.remove('hidden');
-        }
-
-        function stopPTTVisual() {
-            document.getElementById('ptt-instruction').classList.remove('hidden');
-            document.getElementById('ptt-active').classList.add('hidden');
-        }
-
-        function addToLog(user, message) {
-            if (!currentChannelKey) return;
-            
-            const time = new Date().toLocaleTimeString('de-DE', { 
-                hour: '2-digit', 
-                minute: '2-digit' 
-            });
-            
-            channelsData[currentChannelKey].log.push({
-                user: user,
-                message: message,
-                time: time
-            });
-            
-            renderLog();
-        }
-
-        function renderLog() {
-            const logEl = document.getElementById('transmission-log');
-            logEl.innerHTML = '';
-            
-            channelsData[currentChannelKey].log.forEach(entry => {
-                const isMe = entry.user === currentUser.username;
-                
-                const div = document.createElement('div');
-                div.className = `flex ${isMe ? 'justify-end' : 'justify-start'} group`;
-                div.innerHTML = `
-                    <div class="${isMe ? 'bg-lime-600 text-black' : 'bg-zinc-800 text-lime-300'} px-5 py-3 rounded-lg max-w-[75%] border-l-4 ${isMe ? 'border-lime-400' : 'border-red-500'}">
-                        <div class="flex items-baseline gap-3">
-                            <span class="font-bold">${entry.user}</span>
-                            <span class="text-[10px] opacity-60">${entry.time}</span>
-                        </div>
-                        <div class="mt-1">${entry.message}</div>
-                    </div>
-                `;
-                logEl.appendChild(div);
-            });
-            
-            logEl.scrollTop = logEl.scrollHeight;
-        }
-
-        function renderOnline() {
-            const list = document.getElementById('online-list');
-            list.innerHTML = '';
-            
-            if (!currentChannelKey) return;
-            
-            const ch = channelsData[currentChannelKey];
-            
-            ch.online.forEach(name => {
-                const div = document.createElement('div');
-                div.className = 'flex items-center gap-3 bg-zinc-800 px-4 py-3 rounded border border-lime-400/20';
-                div.innerHTML = `
-                    <div class="w-3 h-3 bg-green-500 rounded-full animate-pulse"></div>
-                    <span class="text-white">${name}</span>
-                `;
-                list.appendChild(div);
-            });
-            
-            // Du selbst
-            const meDiv = document.createElement('div');
-            meDiv.className = 'flex items-center gap-3 bg-lime-600 text-black px-4 py-3 rounded border border-lime-400';
-            meDiv.innerHTML = `
-                <div class="w-3 h-3 bg-white rounded-full animate-pulse"></div>
-                <span class="font-bold">${currentUser.username} <span class="text-xs">(DU)</span></span>
-            `;
-            list.appendChild(meDiv);
-        }
-
-        function renderChannels() {
-            const container = document.getElementById('channels-list');
-            container.innerHTML = '';
-            
-            Object.keys(channelsData).forEach(key => {
-                const ch = channelsData[key];
-                const btn = document.createElement('button');
-                btn.className = `w-full text-left px-6 py-5 border-l-8 flex items-center gap-5 hover:bg-zinc-800 transition-all ${currentChannelKey === key ? 'border-red-600 bg-zinc-800' : 'border-transparent'}`;
-                btn.innerHTML = `
-                    <span class="text-4xl">${ch.icon}</span>
-                    <div>
-                        <div class="text-white text-lg">${ch.name}</div>
-                        <div class="text-xs text-zinc-500">${ch.online.length} online</div>
-                    </div>
-                `;
-                btn.onclick = () => joinChannel(key);
-                container.appendChild(btn);
-            });
-        }
-
-        function joinChannel(key) {
-            currentChannelKey = key;
-            
-            // Welcome message
-            if (channelsData[key].log.length === 0) {
-                addToLog("SYSTEM", `Willkommen im ${channelsData[key].name}-Funk!`);
-            }
-            
-            document.getElementById('channel-icon').textContent = channelsData[key].icon;
-            document.getElementById('channel-name').textContent = channelsData[key].name;
-            
-            renderLog();
-            renderOnline();
-            renderChannels();
-            
-            // Start fake radio chatter
-            if (!fakeTalkInterval) {
-                fakeTalkInterval = setInterval(fakeRadioChatter, 11000);
-            }
-        }
-
-        function leaveChannel() {
-            currentChannelKey = null;
-            renderChannels();
-            document.getElementById('transmission-log').innerHTML = `
-                <div class="h-full flex items-center justify-center text-zinc-600 text-center">
-                    <div>
-                        <div class="text-6xl mb-6 opacity-30">📡</div>
-                        <div class="text-xl">WÄHLE EINEN FUNK AUS</div>
-                    </div>
-                </div>
-            `;
-            document.getElementById('online-list').innerHTML = '';
-        }
-
-        function fakeRadioChatter() {
-            if (!currentChannelKey || !currentUser) return;
-            
-            const ch = channelsData[currentChannelKey];
-            const speaker = ch.online[Math.floor(Math.random() * ch.online.length)];
-            const msg = ch.messages[Math.floor(Math.random() * ch.messages.length)];
-            
-            addToLog(speaker, msg);
-            
-            // Voice output
-            if ('speechSynthesis' in window) {
-                const utterance = new SpeechSynthesisUtterance(msg);
-                utterance.lang = 'de-DE';
-                utterance.rate = 1.1;
-                speechSynthesis.speak(utterance);
-            }
-        }
-
-        function showApp() {
-            document.getElementById('auth-screen').classList.add('hidden');
-            document.getElementById('app-screen').classList.remove('hidden');
-            
-            document.getElementById('username-display').textContent = currentUser.username;
-            
-            renderChannels();
-            
-            // Default to first channel
-            setTimeout(() => {
-                joinChannel('feuerwehr');
-            }, 800);
-        }
-
-        function login() {
-            const username = document.getElementById('login-username').value.trim();
-            const password = document.getElementById('login-password').value;
-            
-            if (!username || !password) {
-                alert("Bitte Benutzername und Passwort eingeben!");
-                return;
-            }
-            
-            const user = allUsers.find(u => u.username === username && u.password === password);
-            
-            if (user) {
-                currentUser = { username: username };
-                showApp();
-                initSpeechRecognition();
-            } else {
-                alert("Falscher Benutzername oder Passwort!");
-            }
-        }
-
-        function register() {
-            const username = document.getElementById('reg-username').value.trim();
-            const pw1 = document.getElementById('reg-password').value;
-            const pw2 = document.getElementById('reg-password2').value;
-            
-            if (!username || !pw1) {
-                alert("Alle Felder ausfüllen!");
-                return;
-            }
-            
-            if (pw1 !== pw2) {
-                alert("Passwörter stimmen nicht überein!");
-                return;
-            }
-            
-            if (allUsers.find(u => u.username === username)) {
-                alert("Dieser Benutzername existiert bereits!");
-                return;
-            }
-            
-            allUsers.push({ username: username, password: pw1 });
-            currentUser = { username: username };
-            
-            alert("✅ Account erstellt! Du wirst automatisch eingeloggt.");
-            showApp();
-            initSpeechRecognition();
-        }
-
-        function showRegister() {
-            document.getElementById('login-form').classList.add('hidden');
-            document.getElementById('register-form').classList.remove('hidden');
-        }
-
-        function showLogin() {
-            document.getElementById('register-form').classList.add('hidden');
-            document.getElementById('login-form').classList.remove('hidden');
-        }
-
-        function logout() {
-            if (confirm("Wirklich ausloggen?")) {
-                currentUser = null;
-                currentChannelKey = null;
-                if (fakeTalkInterval) clearInterval(fakeTalkInterval);
-                document.getElementById('app-screen').classList.add('hidden');
-                document.getElementById('auth-screen').classList.remove('hidden');
-                document.getElementById('login-form').classList.remove('hidden');
-                document.getElementById('register-form').classList.add('hidden');
-                
-                // Reset forms
-                document.getElementById('login-username').value = '';
-                document.getElementById('login-password').value = '';
-            }
-        }
-
-        // Keyboard PTT
-        document.addEventListener('keydown', function(e) {
-            if (e.key === "Tab" && currentChannelKey && currentUser) {
-                e.preventDefault();
-                if (!isPTTPressed) {
-                    isPTTPressed = true;
-                    startPTTVisual();
-                    
-                    if (recognition) {
-                        try {
-                            recognition.start();
-                        } catch(err) {}
-                    }
-                }
-            }
-        });
-
-        document.addEventListener('keyup', function(e) {
-            if (e.key === "Tab") {
-                isPTTPressed = false;
-                stopPTTVisual();
-                
-                if (recognition) {
-                    try {
-                        recognition.stop();
-                    } catch(err) {}
-                }
-            }
-        });
-
-        // Start the whole thing
-        window.onload = function() {
-            // Show login by default
-            console.log("%cFUNKNET RP gestartet - Viel Spaß bei den Einsätzen! 🔥", "color:lime; font-family:monospace");
-        };
-    </script>
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="script.js"></script>
 </body>
 </html>
+*/
+
+/* script.js */
+const socket = io();
+let localStream;
+let peers = {};
+let talking = false;
+
+navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+  localStream = stream;
+  stream.getAudioTracks()[0].enabled = false;
+});
+
+const funk = document.getElementById("funk");
+
+funk.onchange = () => {
+  socket.emit("join", funk.value);
+};
+
+// Push To Talk mit V
+window.addEventListener("keydown", e => {
+  if (e.key.toLowerCase() === "v" && !talking) {
+    localStream.getAudioTracks()[0].enabled = true;
+    talking = true;
+  }
+});
+
+window.addEventListener("keyup", e => {
+  if (e.key.toLowerCase() === "v") {
+    localStream.getAudioTracks()[0].enabled = false;
+    talking = false;
+  }
+});
